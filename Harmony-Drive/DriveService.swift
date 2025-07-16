@@ -27,11 +27,7 @@ public class DriveService: NSObject, Service
     public let localizedName = NSLocalizedString("Google Drive", comment: "")
     public let identifier = "com.rileytestut.Harmony.Drive"
 
-    public var clientID: String? {
-        didSet {
-            GIDSignIn.sharedInstance().clientID = self.clientID
-        }
-    }
+    public var clientID: String?
 
     let service = GTLRDriveService()
     
@@ -41,13 +37,6 @@ public class DriveService: NSObject, Service
 
     private override init()
     {
-        var scopes = GIDSignIn.sharedInstance().scopes as? [String] ?? []
-        if !scopes.contains(kGTLRAuthScopeDriveAppdata)
-        {
-            scopes.append(kGTLRAuthScopeDriveAppdata)
-            GIDSignIn.sharedInstance().scopes = scopes
-        }
-        
         super.init()
         
         self.service.shouldFetchNextPages = true
@@ -59,28 +48,37 @@ public extension DriveService
     func authenticate(withPresentingViewController viewController: UIViewController, completionHandler: @escaping (Result<Account, AuthenticationError>) -> Void)
     {
         self.authorizationCompletionHandlers.append(completionHandler)
-
-        GIDSignIn.sharedInstance().presentingViewController = viewController
-        GIDSignIn.sharedInstance().delegate = self
-
-        GIDSignIn.sharedInstance().signIn()
+        
+        do
+        {
+            guard let clientID else { throw AuthenticationError.invalidClientID }
+            
+            let config = GIDConfiguration(clientID: clientID)
+            GIDSignIn.sharedInstance.signIn(with: config, presenting: viewController, hint: nil, additionalScopes: [kGTLRAuthScopeDriveAppdata]) { user, error in
+                self.didSignIn(user: user, error: error)
+            }
+        }
+        catch
+        {
+            self.didSignIn(user: nil, error: error)
+        }
     }
 
     func authenticateInBackground(completionHandler: @escaping (Result<Account, AuthenticationError>) -> Void)
     {
         self.authorizationCompletionHandlers.append(completionHandler)
-
-        GIDSignIn.sharedInstance().delegate = self
-
+        
         // Must run on main thread.
         DispatchQueue.main.async {
-            GIDSignIn.sharedInstance().restorePreviousSignIn()
+            GIDSignIn.sharedInstance.restorePreviousSignIn { user, error in
+                self.didSignIn(user: user, error: error)
+            }
         }
     }
     
     func deauthenticate(completionHandler: @escaping (Result<Void, DeauthenticationError>) -> Void)
     {
-        GIDSignIn.sharedInstance().signOut()
+        GIDSignIn.sharedInstance.signOut()
         completionHandler(.success)
     }
 }
@@ -100,8 +98,8 @@ extension DriveService
             {
                 switch error._code
                 {
-                case GIDSignInErrorCode.canceled.rawValue: throw GeneralError.cancelled
-                case GIDSignInErrorCode.hasNoAuthInKeychain.rawValue: throw AuthenticationError.noSavedCredentials
+                case GIDSignInError.canceled.rawValue: throw GeneralError.cancelled
+                case GIDSignInError.hasNoAuthInKeychain.rawValue: throw AuthenticationError.noSavedCredentials
                 default: throw ServiceError(error)
                 }
             }
@@ -132,19 +130,22 @@ extension DriveService
     }
 }
 
-extension DriveService: GIDSignInDelegate
+private extension DriveService
 {
-    public func sign(_ signIn: GIDSignIn!, didSignInFor user: GIDGoogleUser!, withError error: Error!)
+    func didSignIn(user: GIDGoogleUser?, error: Error?)
     {
         let result: Result<Account, AuthenticationError>
-
+        
         do
         {
             let user = try self.process(Result(user, error))
             
+            // Should always be non-nil if sign-in succeeded according to documentation, but throw fallback error just in case.
+            guard let profile = user.profile else { throw AuthenticationError.other(GeneralError.unknown) }
+            
             self.service.authorizer = user.authentication.fetcherAuthorizer()
             
-            let account = Account(name: user.profile.name, emailAddress: user.profile.email)
+            let account = Account(name: profile.name, emailAddress: profile.email)
             result = .success(account)
         }
         catch
